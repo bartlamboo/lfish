@@ -1,3 +1,4 @@
 requests>=2.25
+requests-toolbelt>=1.0
 urllib3>=1.26
 python-hostlist>=2.1
