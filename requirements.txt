@@ -1,0 +1,3 @@
+requests>=2.25
+urllib3>=1.26
+python-hostlist>=2.1

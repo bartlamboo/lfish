@@ -1,0 +1,78 @@
+# lfish
+
+BMC and BIOS firmware updater via the Redfish API. Built for AMI-based BMCs (tested on Gigabyte servers) with support for parallel operations across many hosts using Slurm-style hostlists.
+
+## Install
+
+```bash
+pip3 install -r requirements.txt
+```
+
+## Usage
+
+```
+lfish.py [-h] -H HOST [-u USER] [-p PASSWORD] [-w WORKERS] {info,tasks,update} ...
+```
+
+### Commands
+
+| Command  | Description                          |
+|----------|--------------------------------------|
+| `info`   | Show firmware versions and system info |
+| `update` | Update BMC or BIOS firmware          |
+| `tasks`  | List active/recent update tasks      |
+
+### Global options
+
+| Flag               | Description                                                        |
+|--------------------|--------------------------------------------------------------------|
+| `-H`, `--host`     | BMC host(s) — single, comma-separated, or hostlist (e.g. `node[001-008]`) |
+| `-u`, `--user`     | Redfish username (default: `admin`)                                |
+| `-p`, `--password` | Redfish password (default: `admin`)                                |
+| `-w`, `--workers`  | Max parallel hosts (default: `20`)                                 |
+| `-k`, `--insecure` | Skip TLS verification (default)                                   |
+| `--secure`         | Enable TLS verification                                            |
+
+### Update options
+
+| Flag               | Description                                              |
+|--------------------|----------------------------------------------------------|
+| `-c`, `--component`| Target component: `BMC`, `BIOS`, `MB_CPLD`, `BPB_CPLD`  |
+| `-f`, `--file`     | Local firmware image to upload                           |
+| `--url`            | Remote firmware image URL (HTTP/HTTPS/FTP)               |
+| `--protocol`       | Transfer protocol (auto-detected from URL if omitted)    |
+
+## Examples
+
+```bash
+# Check firmware versions on a single host
+./lfish.py -H 192.168.1.10 -u admin -p secret info
+
+# Check versions across a rack
+./lfish.py -H 'bmc[001-032]' -u admin -p secret info
+
+# Update BMC from a local file
+./lfish.py -H 192.168.1.10 -u admin -p secret update -c BMC -f bmc_fw.bin
+
+# Update BIOS from a remote URL
+./lfish.py -H 192.168.1.10 -u admin -p secret update -c BIOS --url https://files.example.com/bios_v2.0.bin
+
+# Update BMC on 8 nodes, 4 at a time
+./lfish.py -H 'node[001-008]' -u admin -p secret -w 4 update -c BMC -f bmc_fw.bin
+
+# Mix hostlist styles
+./lfish.py -H '192.168.1.[10-15],mgmt-bmc01' -u admin -p secret tasks
+```
+
+## Hostlist format
+
+The `-H` flag accepts Slurm-style hostlists via [python-hostlist](https://pypi.org/project/python-hostlist/):
+
+| Input                          | Expands to                                  |
+|--------------------------------|---------------------------------------------|
+| `node[001-003]`               | `node001`, `node002`, `node003`             |
+| `192.168.1.[10-12]`           | `192.168.1.10`, `192.168.1.11`, `192.168.1.12` |
+| `gpu[01-02],cpu[01-03]`       | `gpu01`, `gpu02`, `cpu01`, `cpu02`, `cpu03` |
+| `node[1,3,5-7]`               | `node1`, `node3`, `node5`, `node6`, `node7` |
+
+When targeting multiple hosts, each runs in its own thread and output is grouped per host with a summary at the end.
