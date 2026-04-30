@@ -647,8 +647,12 @@ class Dashboard:
     structured fields (BMC, BIOS, Upload%, …) which accumulate in
     the dashboard, so earlier fields are not overwritten by later
     log lines.  When a host finishes, the line is left in place
-    with a ✓ or ✗ marker, and the full buffered output is dumped
-    above the dashboard for review.
+    with a ✓ or ✗ marker.
+
+    Once all hosts have completed (or any time the caller invokes
+    `dump_all()`), the dashboard is erased and the full per-host
+    output is printed in *hostlist order* so reviewing failures
+    is straightforward.
     """
 
     OK_MARK = "✓"
@@ -678,11 +682,19 @@ class Dashboard:
         return log
 
     def finish(self, host, success):
-        """Mark a host as complete and dump its full output above the dashboard."""
+        """Mark a host as complete; just update the dashboard line."""
         with self.lock:
             self.done[host] = bool(success)
-            self._dump_host_block(host)
             self._redraw()
+
+    def dump_all(self):
+        """Erase the dashboard and print every host's full output in
+        hostlist order.  Safe to call after all hosts have finished.
+        """
+        with self.lock:
+            self._erase()
+            for host in self.hosts:
+                self._dump_host_block(host)
 
     # ── Internal ───────────────────────────────────────────────
 
@@ -744,11 +756,11 @@ class Dashboard:
         self.drawn = len(self.hosts)
 
     def _dump_host_block(self, host):
-        """Print this host's full buffered output above the dashboard."""
+        """Print one host's full buffered output (caller should have
+        already erased the live dashboard)."""
         if host in self.dumped:
             return
         self.dumped.add(host)
-        self._erase()
 
         sep = "─" * 60
         mark = self._mark(host)
@@ -869,6 +881,11 @@ def main():
                 dashboard.finish(host, ok)
             if not ok:
                 failed.append(host)
+
+    # All hosts done — replace the dashboard with full per-host
+    # output in hostlist order.
+    if dashboard is not None:
+        dashboard.dump_all()
 
     ok_count = len(hosts) - len(failed)
     print(f"\n{'═' * 60}\n  Done: {ok_count}/{len(hosts)} succeeded")
