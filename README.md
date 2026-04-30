@@ -90,9 +90,24 @@ The `-H` flag accepts Slurm-style hostlists via [python-hostlist](https://pypi.o
 | `gpu[01-02],cpu[01-03]`  | `gpu01`, `gpu02`, `cpu01`, `cpu02`, `cpu03`      |
 | `node[1,3,5-7]`          | `node1`, `node3`, `node5`, `node6`, `node7`     |
 
-When targeting multiple hosts each runs in its own thread and output is
-grouped per host with a summary at the end.  Use `-w` to limit concurrency
-(e.g. `-w 4` to flash four nodes at a time).
+When targeting multiple hosts each runs in its own thread and output
+streams in real time with a `[hostname]` prefix on every line so you
+can follow progress as it happens.  A summary is printed at the end.
+Use `-w` to limit concurrency (e.g. `-w 4` to flash four nodes at a
+time).
+
+## What happens during an update
+
+1. **Validate** the component name against what the BMC supports.
+2. **Set preserve flags** via the AMI maintenance API (if `--preserve-config`).
+3. **Stream the firmware image** to `/redfish/v1/UpdateService/upload`
+   with a live progress indicator (every 10%).
+4. **Track the Redfish task** until it reaches a terminal state.  When
+   the task's `TaskMonitor` is cleared (HTTP 404 on subsequent polls)
+   the underlying `Task` is fetched as a fallback to read the final
+   outcome.
+5. **Wait for the BMC to come back online** if it dropped the connection
+   to flash and reboot, then **verify the new firmware version**.
 
 ## Examples
 

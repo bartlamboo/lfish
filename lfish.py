@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
@@ -210,6 +211,24 @@ def _extract_task_uri(response):
     return None
 
 
+def _resolve_completed_task(client, task_uri, log):
+    """When a TaskMonitor returns 404, fall back to the persistent Task.
+
+    A TaskMonitor (transient) is removed after completion, but the
+    underlying Task at /redfish/v1/TaskService/Tasks/<id> persists
+    and holds the final state, status and messages.
+    """
+    if "/TaskMonitors/" not in task_uri:
+        return None
+
+    task_id = task_uri.rstrip("/").rsplit("/", 1)[-1]
+    fallback_uri = f"{PATH_TASKS}/{task_id}"
+    try:
+        return client.get(fallback_uri)
+    except requests.HTTPError:
+        return None
+
+
 def _poll_task(client, task_uri, log):
     """Poll a task until it reaches a terminal state or times out."""
     log(f"  Tracking task: {task_uri}")
@@ -220,7 +239,22 @@ def _poll_task(client, task_uri, log):
         try:
             t = client.get(task_uri)
         except requests.HTTPError as e:
-            # Task endpoint may vanish after completion on some BMCs
+            if e.response.status_code == 404:
+                # TaskMonitor disappeared — task completed and was cleaned up.
+                # Fall back to the persistent Task to read the real outcome.
+                t = _resolve_completed_task(client, task_uri, log)
+                if t:
+                    state = t.get("TaskState", "Unknown")
+                    status = t.get("TaskStatus", "")
+                    for msg in t.get("Messages", []):
+                        log(f"  {msg.get('Message', '')}")
+                    if state == "Completed" and status in ("OK", ""):
+                        log("  Update completed successfully.")
+                        return True
+                    log(f"  Update ended: state={state}, status={status}")
+                    return False
+                log("  Task monitor cleared and Task record not found — assuming success.")
+                return True
             log(f"  Task returned {e.response.status_code} — may have completed.")
             return True
 
@@ -549,23 +583,40 @@ COMMANDS = {
 }
 
 
-def run_on_host(host, args, verify_ssl):
+_print_lock = threading.Lock()
+
+
+def _make_prefixed_log(host, width):
+    """Return a log() that prints each line with a fixed-width host prefix.
+
+    A lock serialises writes so per-line output never interleaves
+    between threads.  Multi-line strings get a prefix on every line.
+    """
+    prefix = f"[{host:<{width}}]"
+
+    def log(text):
+        with _print_lock:
+            for line in str(text).split("\n"):
+                print(f"{prefix} {line}", flush=True)
+
+    return log
+
+
+def run_on_host(host, args, verify_ssl, log):
     """Execute the requested command on one host.
 
-    Returns (host, success, output_lines).
+    Returns (host, success).  Output is emitted via the supplied log()
+    callable in real time — nothing is buffered.
     """
-    lines = []
-    log = lines.append
-
     client = RedfishClient(host, args.user, args.password, verify_ssl)
     ok, err = client.check_connection()
     if not ok:
         log(f"  {err}")
-        return host, False, lines
+        return host, False
 
     handler = COMMANDS.get(args.command)
     success = handler(client, args, log) if handler else False
-    return host, success, lines
+    return host, success
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
@@ -608,15 +659,6 @@ def build_parser():
     return p
 
 
-def _print_host_block(host, lines, multi):
-    """Print buffered output for a host, with a header in multi mode."""
-    if multi:
-        sep = "─" * 60
-        print(f"\n{sep}\n  {host}\n{sep}")
-    for line in lines:
-        print(line)
-
-
 def main():
     args = build_parser().parse_args()
     verify_ssl = args.secure and not args.insecure
@@ -627,30 +669,27 @@ def main():
     except Exception:
         hosts = [args.host]
 
-    # ── Single host: run directly with real-time output ─────────
+    # ── Single host: real-time output, no prefix ────────────────
     if len(hosts) == 1:
-        client = RedfishClient(hosts[0], args.user, args.password, verify_ssl)
-        ok, err = client.check_connection()
-        if not ok:
-            print(f"  {err}")
-            sys.exit(1)
-        handler = COMMANDS.get(args.command)
-        success = handler(client, args, print) if handler else False
+        _, success = run_on_host(hosts[0], args, verify_ssl, print)
         sys.exit(0 if success else 1)
 
-    # ── Multiple hosts: parallel execution ───────────────────────
+    # ── Multiple hosts: parallel execution, prefixed real-time ──
     print(f"Targeting {len(hosts)} hosts (workers={args.workers}): "
-          f"{', '.join(hosts[:5])}{'...' if len(hosts) > 5 else ''}")
+          f"{', '.join(hosts[:5])}{'...' if len(hosts) > 5 else ''}\n")
 
+    width = max(len(h) for h in hosts)
     failed = []
     workers = min(args.workers, len(hosts))
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(run_on_host, h, args, verify_ssl): h
-                   for h in hosts}
+        futures = {
+            pool.submit(run_on_host, h, args, verify_ssl,
+                        _make_prefixed_log(h, width)): h
+            for h in hosts
+        }
         for future in as_completed(futures):
-            host, ok, lines = future.result()
-            _print_host_block(host, lines, multi=True)
+            host, ok = future.result()
             if not ok:
                 failed.append(host)
 
