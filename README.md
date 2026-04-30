@@ -48,6 +48,7 @@ lfish.py [-h] -H HOST [-u USER] [-p PASSWORD] [-w WORKERS] {info,tasks,update} .
 | `-u`, `--user`     | Redfish username (default: `admin`)                                       |
 | `-p`, `--password` | Redfish password (default: `admin`)                                       |
 | `-w`, `--workers`  | Max parallel hosts (default: `20`)                                        |
+| `-v`, `--verbose`  | Multi-host: stream every log line with `[host]` prefix instead of dashboard |
 | `-k`, `--insecure` | Skip TLS verification (default)                                          |
 | `--secure`         | Enable TLS verification                                                   |
 
@@ -90,11 +91,28 @@ The `-H` flag accepts Slurm-style hostlists via [python-hostlist](https://pypi.o
 | `gpu[01-02],cpu[01-03]`  | `gpu01`, `gpu02`, `cpu01`, `cpu02`, `cpu03`      |
 | `node[1,3,5-7]`          | `node1`, `node3`, `node5`, `node6`, `node7`     |
 
-When targeting multiple hosts each runs in its own thread and output
-streams in real time with a `[hostname]` prefix on every line so you
-can follow progress as it happens.  A summary is printed at the end.
-Use `-w` to limit concurrency (e.g. `-w 4` to flash four nodes at a
-time).
+When targeting multiple hosts each runs in its own thread.  Use `-w`
+to limit concurrency (e.g. `-w 4` to flash four nodes at a time).
+
+### Output modes
+
+When stdout is a terminal, multi-host runs use a **live dashboard** by
+default.  Each host gets a single line that updates in place with its
+current status.  When a host finishes, a `✓` (success) or `✗` (failed)
+appears next to its name:
+
+```
+    cyclo-node08.ipmi  Sent 100% (32/32 MB)
+    cyclo-node09.ipmi  [######------------]  35%  Running
+  ✓ cyclo-node10.ipmi  Update completed successfully.
+  ✗ cyclo-node11.ipmi  Update ended: state=Exception
+    cyclo-node12.ipmi  Setting preserve configuration ...
+```
+
+Pass `-v` / `--verbose` to switch to the streaming view, where every
+log line is printed in real time with a `[hostname]` prefix.  This
+mode is also used automatically when stdout isn't a TTY (e.g. when
+piping output to a file or another process).
 
 ## What happens during an update
 

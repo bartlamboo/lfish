@@ -602,6 +602,70 @@ def _make_prefixed_log(host, width):
     return log
 
 
+class Dashboard:
+    """Live one-line-per-host status display, redrawn in place.
+
+    Each host gets a single line that always shows its most recent
+    log message.  When a host finishes, a check-mark or cross is
+    rendered next to its name.  The whole block is overwritten on
+    each update using ANSI cursor movement.
+    """
+
+    OK_MARK = "✓"      # ✓
+    FAIL_MARK = "✗"    # ✗
+    PENDING_MARK = " "
+
+    def __init__(self, hosts):
+        self.hosts = list(hosts)
+        self.width = max(len(h) for h in self.hosts)
+        self.lines = {h: "queued" for h in self.hosts}
+        self.done = {h: None for h in self.hosts}  # None | True | False
+        self.lock = threading.Lock()
+        self.drawn = False
+
+    def make_log(self, host):
+        """Return a log() callable bound to this host."""
+        def log(text):
+            line = str(text).strip().split("\n")[0].strip()
+            if not line:
+                return
+            with self.lock:
+                self.lines[host] = line
+                self._redraw()
+        return log
+
+    def finish(self, host, success):
+        with self.lock:
+            self.done[host] = bool(success)
+            self._redraw()
+
+    def _mark(self, host):
+        if self.done[host] is True:
+            return self.OK_MARK
+        if self.done[host] is False:
+            return self.FAIL_MARK
+        return self.PENDING_MARK
+
+    def _redraw(self):
+        # Truncate to terminal width to avoid wrapping
+        try:
+            term_width = os.get_terminal_size().columns
+        except OSError:
+            term_width = 120
+
+        if self.drawn:
+            # Cursor up N lines, clear from cursor to end of screen
+            sys.stdout.write(f"\x1b[{len(self.hosts)}A\x1b[J")
+
+        for host in self.hosts:
+            line = f"  {self._mark(host)} {host:<{self.width}}  {self.lines[host]}"
+            if len(line) > term_width:
+                line = line[:term_width - 1] + "…"  # ellipsis
+            sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+        self.drawn = True
+
+
 def run_on_host(host, args, verify_ssl, log):
     """Execute the requested command on one host.
 
@@ -640,6 +704,9 @@ def build_parser():
                    help="Enable TLS certificate verification")
     p.add_argument("-w", "--workers", type=int, default=DEFAULT_WORKERS,
                    help=f"Max parallel hosts (default: {DEFAULT_WORKERS})")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="Multi-host: stream every log line with a [host] "
+                        "prefix instead of the live dashboard")
 
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("info",  help="Show firmware versions and system info")
@@ -674,22 +741,40 @@ def main():
         _, success = run_on_host(hosts[0], args, verify_ssl, print)
         sys.exit(0 if success else 1)
 
-    # ── Multiple hosts: parallel execution, prefixed real-time ──
+    # ── Multiple hosts: parallel execution ──────────────────────
     print(f"Targeting {len(hosts)} hosts (workers={args.workers}): "
           f"{', '.join(hosts[:5])}{'...' if len(hosts) > 5 else ''}\n")
 
-    width = max(len(h) for h in hosts)
     failed = []
     workers = min(args.workers, len(hosts))
 
+    # Live dashboard if stdout is a TTY and -v is not requested,
+    # otherwise stream prefixed lines (so piping to a file still
+    # yields readable output).
+    use_dashboard = sys.stdout.isatty() and not args.verbose
+    dashboard = Dashboard(hosts) if use_dashboard else None
+
+    if use_dashboard:
+        # Draw initial empty dashboard so threads can update in place
+        with dashboard.lock:
+            dashboard._redraw()
+
+    width = max(len(h) for h in hosts)
+
+    def make_log(host):
+        if dashboard is not None:
+            return dashboard.make_log(host)
+        return _make_prefixed_log(host, width)
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(run_on_host, h, args, verify_ssl,
-                        _make_prefixed_log(h, width)): h
+            pool.submit(run_on_host, h, args, verify_ssl, make_log(h)): h
             for h in hosts
         }
         for future in as_completed(futures):
             host, ok = future.result()
+            if dashboard is not None:
+                dashboard.finish(host, ok)
             if not ok:
                 failed.append(host)
 
