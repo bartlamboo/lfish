@@ -1,0 +1,23 @@
+# Local-only Claude Code instructions (not for upstream)
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Firmware images and vendor packages (unpacked into the repo while testing)
+*.bin
+*.RBU
+*.rom
+*.zip
+*.pdf
+*.nsh
+RBU/
+SPI_UPD/
+Tool/
+not/
+126139/
+server_*/

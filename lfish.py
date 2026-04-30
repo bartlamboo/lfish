@@ -17,6 +17,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -602,42 +603,102 @@ def _make_prefixed_log(host, width):
     return log
 
 
-class Dashboard:
-    """Live one-line-per-host status display, redrawn in place.
+# Patterns that extract structured fields from log() lines so the
+# dashboard can show "BMC=12.61.39 BIOS=F22" instead of whatever the
+# most recent line happened to be.  The order in which keys are added
+# is preserved so the dashboard column layout is predictable.
+_FIELD_PATTERNS = [
+    # info command
+    (re.compile(r"^\s*Manufacturer\s*:\s*(.+)$"),  "Vendor"),
+    (re.compile(r"^\s*Model\s*:\s*(.+)$"),         "Model"),
+    (re.compile(r"^\s*Power State\s*:\s*(.+)$"),   "Power"),
+    (re.compile(r"^\s*BMC Version\s*:\s*(.+)$"),   "BMC"),
+    (re.compile(r"^\s*BIOS Version\s*:\s*(.+)$"),  "BIOS"),
 
-    Each host gets a single line that always shows its most recent
-    log message.  When a host finishes, a check-mark or cross is
-    rendered next to its name.  The whole block is overwritten on
-    each update using ANSI cursor movement.
+    # update command
+    (re.compile(r"^\s*Component\s*:\s*(.+)$"),     "Comp"),
+    (re.compile(r"^\s*Current\s*:\s*(.+)$"),       "From"),
+    (re.compile(r"^\s*Sent (\d+%).*$"),            "Upload"),
+    (re.compile(r"^\s*Response:\s*(\d+)$"),        "HTTP"),
+    (re.compile(r"^\s*\[#+\-*\]\s*(\d+%)\s+(\w+)"),"Task"),
+    (re.compile(r"^\s*State:\s*(\w+)$"),           "Task"),
+    (re.compile(r"^\s*Firmware updated:\s*\S+\s*->\s*(\S+)"), "New"),
+    (re.compile(r"^\s*Firmware version:\s*(\S+)"), "New"),
+]
+
+_STATUS_LINE_PATTERNS = [
+    (re.compile(r"^\s*(Setting preserve.*)$"),                 "preserve"),
+    (re.compile(r"^\s*(Uploading.*)$"),                        "uploading"),
+    (re.compile(r"^\s*(Tracking task.*)$"),                    "tracking"),
+    (re.compile(r"^\s*(Waiting for BMC.*)$"),                  "waiting"),
+    (re.compile(r"^\s*(BMC dropped connection.*)$"),           "rebooting"),
+    (re.compile(r"^\s*Update completed successfully\.?\s*$"),  "completed"),
+    (re.compile(r"^\s*Update ended.*$"),                       "failed"),
+    (re.compile(r"^\s*Cannot connect.*$"),                     "unreachable"),
+    (re.compile(r"^\s*Authentication failed.*$"),              "auth failed"),
+    (re.compile(r"^\s*Error:.*$"),                             "error"),
+]
+
+
+class Dashboard:
+    """Live multi-host status display.
+
+    Each host occupies one line.  Log() output is parsed into
+    structured fields (BMC, BIOS, Upload%, …) which accumulate in
+    the dashboard, so earlier fields are not overwritten by later
+    log lines.  When a host finishes, the line is left in place
+    with a ✓ or ✗ marker, and the full buffered output is dumped
+    above the dashboard for review.
     """
 
-    OK_MARK = "✓"      # ✓
-    FAIL_MARK = "✗"    # ✗
-    PENDING_MARK = " "
+    OK_MARK = "✓"
+    FAIL_MARK = "✗"
+    PENDING_MARK = "·"
 
     def __init__(self, hosts):
         self.hosts = list(hosts)
         self.width = max(len(h) for h in self.hosts)
-        self.lines = {h: "queued" for h in self.hosts}
-        self.done = {h: None for h in self.hosts}  # None | True | False
+        self.fields = {h: {} for h in self.hosts}    # ordered key -> value
+        self.status = {h: "" for h in self.hosts}
+        self.buffers = {h: [] for h in self.hosts}   # all log lines, for replay
+        self.done = {h: None for h in self.hosts}    # None | True | False
+        self.dumped = set()                          # hosts whose output has been dumped
         self.lock = threading.Lock()
-        self.drawn = False
+        self.drawn = 0
 
     def make_log(self, host):
         """Return a log() callable bound to this host."""
         def log(text):
-            line = str(text).strip().split("\n")[0].strip()
-            if not line:
-                return
+            text = str(text)
             with self.lock:
-                self.lines[host] = line
+                self.buffers[host].append(text)
+                for raw_line in text.split("\n"):
+                    self._absorb(host, raw_line)
                 self._redraw()
         return log
 
     def finish(self, host, success):
+        """Mark a host as complete and dump its full output above the dashboard."""
         with self.lock:
             self.done[host] = bool(success)
+            self._dump_host_block(host)
             self._redraw()
+
+    # ── Internal ───────────────────────────────────────────────
+
+    def _absorb(self, host, line):
+        """Update fields/status from one log line."""
+        # Field extraction
+        for pattern, key in _FIELD_PATTERNS:
+            m = pattern.match(line)
+            if m:
+                self.fields[host][key] = m.group(1).strip()
+                # Don't return — multiple patterns may match in theory
+        # Status phrase
+        for pattern, status in _STATUS_LINE_PATTERNS:
+            if pattern.match(line):
+                self.status[host] = status
+                break
 
     def _mark(self, host):
         if self.done[host] is True:
@@ -646,24 +707,55 @@ class Dashboard:
             return self.FAIL_MARK
         return self.PENDING_MARK
 
-    def _redraw(self):
-        # Truncate to terminal width to avoid wrapping
-        try:
-            term_width = os.get_terminal_size().columns
-        except OSError:
-            term_width = 120
+    def _format_fields(self, host):
+        parts = [f"{k}={v}" for k, v in self.fields[host].items()]
+        # Show status phrase as a trailing tag if it's still relevant
+        # (i.e. the host is in progress).  Hide it once the host is done
+        # since the ✓/✗ marker already conveys that.
+        if self.status[host] and self.done[host] is None:
+            parts.append(f"({self.status[host]})")
+        if not parts:
+            return "queued" if self.done[host] is None else ""
+        return "  ".join(parts)
 
+    def _term_width(self):
+        try:
+            return os.get_terminal_size().columns
+        except OSError:
+            return 120
+
+    def _erase(self):
         if self.drawn:
-            # Cursor up N lines, clear from cursor to end of screen
-            sys.stdout.write(f"\x1b[{len(self.hosts)}A\x1b[J")
+            sys.stdout.write(f"\x1b[{self.drawn}A\x1b[J")
+            self.drawn = 0
+
+    def _redraw(self):
+        self._erase()
+        term_width = self._term_width()
 
         for host in self.hosts:
-            line = f"  {self._mark(host)} {host:<{self.width}}  {self.lines[host]}"
+            line = (f"  {self._mark(host)} "
+                    f"{host:<{self.width}}  "
+                    f"{self._format_fields(host)}")
             if len(line) > term_width:
-                line = line[:term_width - 1] + "…"  # ellipsis
+                line = line[:term_width - 1] + "…"
             sys.stdout.write(line + "\n")
         sys.stdout.flush()
-        self.drawn = True
+        self.drawn = len(self.hosts)
+
+    def _dump_host_block(self, host):
+        """Print this host's full buffered output above the dashboard."""
+        if host in self.dumped:
+            return
+        self.dumped.add(host)
+        self._erase()
+
+        sep = "─" * 60
+        mark = self._mark(host)
+        print(f"\n{sep}\n  {mark} {host}\n{sep}")
+        for chunk in self.buffers[host]:
+            for line in chunk.split("\n"):
+                print(line)
 
 
 def run_on_host(host, args, verify_ssl, log):

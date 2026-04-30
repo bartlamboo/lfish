@@ -97,17 +97,23 @@ to limit concurrency (e.g. `-w 4` to flash four nodes at a time).
 ### Output modes
 
 When stdout is a terminal, multi-host runs use a **live dashboard** by
-default.  Each host gets a single line that updates in place with its
-current status.  When a host finishes, a `✓` (success) or `✗` (failed)
-appears next to its name:
+default.  Each host gets a single line that accumulates structured
+fields parsed from the log output (`BMC`, `BIOS`, `Upload`, `Task`, …)
+plus a status phrase in parentheses for the current activity.  As
+hosts complete, a `✓` (success) or `✗` (failed) marker appears next
+to the name and the host's full output is printed above the dashboard:
 
 ```
-    cyclo-node08.ipmi  Sent 100% (32/32 MB)
-    cyclo-node09.ipmi  [######------------]  35%  Running
-  ✓ cyclo-node10.ipmi  Update completed successfully.
-  ✗ cyclo-node11.ipmi  Update ended: state=Exception
-    cyclo-node12.ipmi  Setting preserve configuration ...
+  ✓ cyclo-node05.ipmi  Vendor=GIGABYTE  Model=R152-Z32  BIOS=F22  BMC=12.61.39  Power=On
+  · cyclo-node06.ipmi  Comp=BMC  From=12.61.19  Upload=80%  (uploading)
+  · cyclo-node07.ipmi  Comp=BMC  From=12.61.19  Upload=100%  Task=Running  (tracking)
+  ✗ cyclo-node08.ipmi  Comp=BMC  From=12.61.19  (failed)
+  · cyclo-node09.ipmi  queued
 ```
+
+Earlier fields are not overwritten by later log lines, so for `info`
+you keep seeing all the version/manufacturer data, and for `update`
+the upload/task progress accumulates next to the firmware versions.
 
 Pass `-v` / `--verbose` to switch to the streaming view, where every
 log line is printed in real time with a `[hostname]` prefix.  This
