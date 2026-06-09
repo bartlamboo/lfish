@@ -173,7 +173,9 @@ without firing an actual flash.
 
 ### Example plugin
 
-`~/lfish-plugins/asus_oem_bios.py`:
+A ready-to-copy template ships in `plugins/examples/asus_oem_bios.py`.
+Drop a copy (with the OEM action URI swapped out for your BMC's
+actual endpoint) into `$LFISH_PLUGINS_DIR`. The condensed version:
 
 ```python
 """OEM BIOS update for an ASUS BMC that ships its own action URI.
